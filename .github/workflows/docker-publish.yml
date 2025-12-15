@@ -1,0 +1,118 @@
+name: DockerHub Publish
+on: 
+  workflow_dispatch:
+  push:  
+  schedule:
+  - cron: "0 5 * * *"
+  
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    outputs:
+      remote_vers: ${{ steps.step_get_remote_version.outputs.remote_vers }}
+      docker_vers: ${{ steps.step_get_docker_version.outputs.docker_vers }}
+      output: ${{ steps.step_success.outputs.output }}
+    steps:
+      #- name: Check out repository code
+      #  uses: actions/checkout@v3
+      #  with:
+      #    fetch-depth: "0"
+    
+      - name: Checkout
+        run: |
+          git clone https://github.com/davideciarmiello/docker-snmptraps2mqtt.git .
+                  
+      - id: step_get_remote_version
+        name: Access cloned repository content
+        #continue-on-error: true
+        run: |
+          #git_tag=$(git describe --tags --abbrev=0)
+          git_tag=""
+          #echo "s1 $git_tag"
+          #git_date=$(git log -1 --pretty='format:%cd' --date=format:'%Y%m%d%S' -- . ':(exclude).cache' -- . ':(exclude).github' )
+          git_date=$(git log -1 --pretty='format:%cd' --date=format:'%Y%m%d%S' -- 'Dockerfile' 'app' ':(exclude)github-artifact' ':(exclude).github' )
+          #echo "s2 $git_date"
+          vers="${git_tag:-v1}.${git_date:-0}"
+          #echo "s3 $vers"
+          echo "Current remote version: $vers"
+          #echo "remote_vers=$vers" >> $GITHUB_ENV
+          echo "::set-output name=remote_vers::$vers"
+          
+      #- uses: actions/download-artifact@v3
+      #  with:
+      #     name: docker_version
+      #     path: ./docker_version
+         
+      - id: step_get_docker_version
+        run: |
+          mkdir -p github-artifact
+          touch ./github-artifact/docker_version
+          vers="$(cat ./github-artifact/docker_version 2>/dev/null)"
+          echo "Current docker version: $vers"
+          #echo "docker_vers=$vers" >> $GITHUB_ENV
+          echo "::set-output name=docker_vers::$vers"
+
+      - name: Show the values of the outputs
+        if: success()
+        run: |
+          # using the syntax steps.<step_id>.outputs.<output_name> to access the output parameters
+          echo "remote_vers = ${{ steps.step_get_remote_version.outputs.remote_vers }}"
+          echo "docker_vers = ${{ steps.step_get_docker_version.outputs.docker_vers }}"
+
+      - id: step_success
+        if: success()
+        run: echo "::set-output name=output::success"
+        
+
+  docker-pubblish:
+    runs-on: ubuntu-latest
+    needs: [version-check]
+    outputs:
+      output: ${{ steps.step_success.outputs.output }}
+    if: needs.version-check.outputs.output == 'success' && needs.version-check.outputs.docker_vers != needs.version-check.outputs.remote_vers
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      - name: Login to DockerHub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PASS }}
+     
+      - name: Build and push
+        uses: docker/build-push-action@v3
+        if: needs.version-check.outputs.output == 'success' && needs.version-check.outputs.docker_vers != needs.version-check.outputs.remote_vers
+        with:
+          context: .
+          platforms:  linux/arm/v7,linux/arm64/v8,linux/amd64
+          push: true
+          tags: davideciarmi/snmptraps2mqtt:latest,davideciarmi/snmptraps2mqtt:${{needs.version-check.outputs.remote_vers}}
+         
+      - id: step_success
+        if: success()
+        run: echo "::set-output name=output::success"
+
+  version-committ:
+    runs-on: ubuntu-latest
+    needs: [version-check, docker-pubblish]
+    if: needs.version-check.outputs.output == 'success' && needs.version-check.outputs.docker_vers != needs.version-check.outputs.remote_vers && needs.docker-pubblish.outputs.output == 'success'
+    steps:
+      - run: echo ${{needs.version-check.outputs.remote_vers}} ${{needs.version-check.outputs.docker_vers}} ${{needs.version-check.outputs.output}}
+      - run: echo "Save remote vers after success compile"
+      - name: Check out repository code
+        uses: actions/checkout@v3      
+      - name: Save remote version
+        run: |
+          mkdir -p ./github-artifact
+          echo ${{needs.version-check.outputs.remote_vers}} > ./github-artifact/docker_version
+      - uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: Updated docker version
+      #- uses: actions/upload-artifact@v3
+      #  with:
+      #    name: docker_version
+      #    path: ./docker_version
